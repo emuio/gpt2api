@@ -56,7 +56,7 @@ type RunOptions struct {
 	UserID            uint64
 	KeyID             uint64
 	ModelID           uint64
-	UpstreamModel     string           // 默认 "auto"(由上游根据 system_hints 挑选图像模型)
+	UpstreamModel     string // 默认 "auto"(由上游根据 system_hints 挑选图像模型)
 	Prompt            string
 	N                 int              // 期望返回的图片张数;够数 Poll 就立即返回(速度优先)
 	MaxAttempts       int              // 跨账号重试次数,仅用于无账号/限流等硬错误,默认 1
@@ -67,7 +67,7 @@ type RunOptions struct {
 
 // RunResult 是单次生图的输出。
 type RunResult struct {
-	Status         string   // success / failed
+	Status         string // success / failed
 	ConversationID string
 	AccountID      uint64
 	FileIDs        []string // chatgpt.com 侧的原始 ref("sed:" 前缀表示 sediment)
@@ -226,9 +226,9 @@ func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Tim
 	go func() { wg.Wait(); close(ch) }()
 
 	var (
-		successCount  int
-		lastErrCode   string
-		lastErrMsg    string
+		successCount int
+		lastErrCode  string
+		lastErrMsg   string
 	)
 	for sr := range ch {
 		if sr.ok {
@@ -306,7 +306,7 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 	// 回退到单步接口)
 	cr, err := cli.ChatRequirementsV2(ctx)
 	if err != nil {
-		return false, r.classifyUpstream(err), err
+		return false, r.handleUpstreamErr(lease.Account.ID, err), err
 	}
 	var proofToken string
 	if cr.Proofofwork.Required {
@@ -349,11 +349,7 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 			if err != nil {
 				logger.L().Warn("image runner upload reference failed",
 					zap.Int("idx", idx), zap.Error(err))
-				if ue, ok := err.(*chatgpt.UpstreamError); ok && ue.IsRateLimited() {
-					r.sched.MarkRateLimited(context.Background(), lease.Account.ID)
-					return false, ErrRateLimited, err
-				}
-				return false, ErrUpstream, fmt.Errorf("upload reference %d: %w", idx, err)
+				return false, r.handleUpstreamErr(lease.Account.ID, fmt.Errorf("upload reference %d: %w", idx, err)), err
 			}
 			refs = append(refs, up)
 		}
@@ -398,18 +394,17 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 	// Prepare(conduit_token;拿不到也能降级继续)
 	if ct, err := cli.PrepareFConversation(ctx, convOpt); err == nil {
 		convOpt.ConduitToken = ct
-	} else if ue, ok := err.(*chatgpt.UpstreamError); ok && ue.IsRateLimited() {
-		r.sched.MarkRateLimited(context.Background(), lease.Account.ID)
-		return false, ErrRateLimited, err
+	} else if err != nil {
+		code := r.handleUpstreamErr(lease.Account.ID, err)
+		if code == ErrRateLimited || code == ErrAuthRequired {
+			return false, code, err
+		}
 	}
 
 	// f/conversation SSE
 	stream, err := cli.StreamFConversation(ctx, convOpt)
 	if err != nil {
-		code := r.classifyUpstream(err)
-		if code == ErrRateLimited {
-			r.sched.MarkRateLimited(context.Background(), lease.Account.ID)
-		}
+		code := r.handleUpstreamErr(lease.Account.ID, err)
 		return false, code, err
 	}
 	sseResult := chatgpt.ParseImageSSE(stream)
@@ -557,6 +552,19 @@ func (r *Runner) classifyUpstream(err error) string {
 		return ErrNetworkTransient
 	}
 	return ErrUpstream
+}
+
+// handleUpstreamErr 把 image 链路里的上游错误映射为内部 error code,
+// 同时按错误类型回写账号状态,保证后台展示和真实可用性一致。
+func (r *Runner) handleUpstreamErr(accountID uint64, err error) string {
+	code := r.classifyUpstream(err)
+	switch code {
+	case ErrRateLimited:
+		r.sched.MarkRateLimited(context.Background(), accountID)
+	case ErrAuthRequired:
+		r.sched.MarkDead(context.Background(), accountID)
+	}
+	return code
 }
 
 // GenerateTaskID 生成对外 task_id。

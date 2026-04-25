@@ -61,6 +61,8 @@ func (h *Handler) CreateOrder(c *gin.Context) {
 		switch {
 		case errors.Is(err, ErrChannelDisabled):
 			resp.Fail(c, 40301, "支付通道未配置,请联系管理员")
+		case errors.Is(err, ErrPayMethodUnsupported):
+			resp.BadRequest(c, "当前仅支持支付宝支付")
 		case errors.Is(err, ErrRechargeDisabled):
 			resp.Forbidden(c, "管理员已关闭充值")
 		case errors.Is(err, ErrAmountOutOfRange):

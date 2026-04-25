@@ -21,6 +21,7 @@ import (
 var (
 	ErrPackageUnavailable  = errors.New("recharge: package not available")
 	ErrChannelDisabled     = errors.New("recharge: pay channel disabled")
+	ErrPayMethodUnsupported = errors.New("recharge: pay method unsupported")
 	ErrOrderNotFound       = errors.New("recharge: order not found")
 	ErrOrderStateInvalid   = errors.New("recharge: order state invalid")
 	ErrRechargeDisabled    = errors.New("recharge: recharge is disabled by admin")
@@ -123,6 +124,9 @@ type CreateInput struct {
 func (s *Service) Create(ctx context.Context, in CreateInput) (*Order, error) {
 	if !s.Enabled() {
 		return nil, ErrChannelDisabled
+	}
+	if in.PayType != "" && in.PayType != "alipay" {
+		return nil, ErrPayMethodUnsupported
 	}
 	// 充值总开关(settings 未注入时视为允许,兼容旧行为)
 	if s.settings != nil && !s.settings.RechargeEnabled() {
